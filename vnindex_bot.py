@@ -1,7 +1,8 @@
 """
-VN-Index Analysis Bot v2
-Dùng thư viện vnstock (v4) để lấy dữ liệu chính xác.
-Gửi báo cáo Telegram 7h sáng & 16h30 chiều mỗi ngày làm việc.
+VN-Index Analysis Bot v3
+- Tiêu đề: chỉ ngày giờ
+- Fibonacci: 2 vùng gần nhất
+- Khối lượng 30 ngày: phân tích gom/phân phối/phân kỳ
 """
 
 import os
@@ -10,190 +11,161 @@ from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
 import pytz
 
-# ─── CONFIG ──────────────────────────────────────────────────────────────────
-TELEGRAM_TOKEN  = os.environ["TELEGRAM_TOKEN"]
+TELEGRAM_TOKEN   = os.environ["TELEGRAM_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
-VN_TZ = pytz.timezone("Asia/Ho_Chi_Minh")
+VN_TZ  = pytz.timezone("Asia/Ho_Chi_Minh")
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 
-# ─── LẤY DỮ LIỆU VNINDEX ─────────────────────────────────────────────────────
-def fetch_vnindex():
-    """Lấy dữ liệu VN-Index từ vnstock (nguồn KBS - không cần auth)."""
-    try:
-        from vnstock import Vnstock
-        stock = Vnstock().stock(symbol='VNINDEX', source='KBS')
-        # Lấy giá hiện tại / lịch sử gần nhất
-        today = datetime.now(VN_TZ).strftime('%Y-%m-%d')
-        week_ago = (datetime.now(VN_TZ) - timedelta(days=7)).strftime('%Y-%m-%d')
-        df = stock.quote.history(start=week_ago, end=today, interval='1D')
-        if df is not None and not df.empty:
-            last = df.iloc[-1]
-            prev = df.iloc[-2] if len(df) > 1 else None
-            price = float(last['close'])
-            change = price - float(prev['close']) if prev is not None else 0
-            pct = (change / float(prev['close']) * 100) if prev is not None else 0
-            volume = float(last.get('volume', 0))
-            return {
-                "price": price,
-                "change": round(change, 2),
-                "pct": round(pct, 2),
-                "volume": volume,
-                "high": float(last.get('high', price)),
-                "low":  float(last.get('low', price)),
-                "source": "vnstock/KBS"
-            }
-    except Exception as e:
-        print(f"[vnstock/KBS] Lỗi: {e}")
+FIB_LOW  = 1200.0
+FIB_HIGH = 1933.11
 
-    # Fallback 1: TCBS
-    try:
-        from vnstock import Vnstock
-        stock = Vnstock().stock(symbol='VNINDEX', source='TCBS')
-        today = datetime.now(VN_TZ).strftime('%Y-%m-%d')
-        week_ago = (datetime.now(VN_TZ) - timedelta(days=7)).strftime('%Y-%m-%d')
-        df = stock.quote.history(start=week_ago, end=today, interval='1D')
-        if df is not None and not df.empty:
-            last = df.iloc[-1]
-            prev = df.iloc[-2] if len(df) > 1 else None
-            price = float(last['close'])
-            change = price - float(prev['close']) if prev is not None else 0
-            pct = (change / float(prev['close']) * 100) if prev is not None else 0
-            return {
-                "price": price,
-                "change": round(change, 2),
-                "pct": round(pct, 2),
-                "volume": float(last.get('volume', 0)),
-                "high": float(last.get('high', price)),
-                "low":  float(last.get('low', price)),
-                "source": "vnstock/TCBS"
-            }
-    except Exception as e:
-        print(f"[vnstock/TCBS] Lỗi: {e}")
-
-    # Fallback 2: Scrape CafeF
-    try:
-        url = "https://cafef.vn/du-lieu/Ajax/PageNew/DataGradienVN30/BigTable.ashx?take=1&skip=0&filter=VNINDEX"
-        r = requests.get(url, headers=HEADERS, timeout=10)
-        data = r.json()
-        item = data["Data"]["Data"][0]
-        price = float(item["lastPrice"])
-        change = float(item["priceChange"])
-        pct = float(item["percentPriceChange"])
-        return {
-            "price": price, "change": change, "pct": pct,
-            "volume": float(item.get("totalVolume", 0)),
-            "high": float(item.get("highPrice", price)),
-            "low":  float(item.get("lowPrice", price)),
-            "source": "CafeF API"
-        }
-    except Exception as e:
-        print(f"[CafeF API] Lỗi: {e}")
-
+# ─── LẤY DỮ LIỆU ─────────────────────────────────────────────────────────────
+def fetch_history(days=35):
+    """Lấy lịch sử N ngày từ vnstock."""
+    end   = datetime.now(VN_TZ).strftime('%Y-%m-%d')
+    start = (datetime.now(VN_TZ) - timedelta(days=days)).strftime('%Y-%m-%d')
+    for source in ['KBS', 'TCBS']:
+        try:
+            from vnstock import Vnstock
+            df = Vnstock().stock(symbol='VNINDEX', source=source) \
+                          .quote.history(start=start, end=end, interval='1D')
+            if df is not None and len(df) >= 2:
+                print(f"[vnstock/{source}] OK — {len(df)} phiên")
+                return df
+        except Exception as e:
+            print(f"[vnstock/{source}] Lỗi: {e}")
     return None
 
 
-def fetch_breadth():
-    """Lấy số mã tăng/giảm/đứng từ CafeF."""
-    try:
-        url = "https://cafef.vn/du-lieu/Ajax/PageNew/DataGradienVN30/BigTable.ashx?take=1&skip=0&filter=VNINDEX"
-        r = requests.get(url, headers=HEADERS, timeout=10)
-        data = r.json()
-        item = data["Data"]["Data"][0]
-        return {
-            "advances":  item.get("advances", "?"),
-            "declines":  item.get("declines", "?"),
-            "nochanges": item.get("nochanges", "?"),
-        }
-    except:
-        return {}
-
-
-def fetch_weekly_data():
-    """Lấy dữ liệu 1 tháng để tính tuần/tháng."""
-    try:
-        from vnstock import Vnstock
-        stock = Vnstock().stock(symbol='VNINDEX', source='KBS')
-        end = datetime.now(VN_TZ).strftime('%Y-%m-%d')
-        start = (datetime.now(VN_TZ) - timedelta(days=30)).strftime('%Y-%m-%d')
-        df = stock.quote.history(start=start, end=end, interval='1D')
-        return df
-    except Exception as e:
-        print(f"[Weekly data] Lỗi: {e}")
+def parse_latest(df):
+    if df is None or df.empty:
         return None
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+    price  = float(last['close'])
+    change = price - float(prev['close'])
+    pct    = change / float(prev['close']) * 100
+    return {
+        "price":  price,
+        "change": round(change, 2),
+        "pct":    round(pct, 2),
+        "volume": float(last.get('volume', 0)),
+        "high":   float(last.get('high', price)),
+        "low":    float(last.get('low', price)),
+    }
 
 
 def fetch_news():
-    """Lấy tin tức từ CafeF."""
     try:
         r = requests.get("https://cafef.vn/thi-truong-chung-khoan.chn",
                          headers=HEADERS, timeout=10)
         soup = BeautifulSoup(r.text, "html.parser")
         news = []
         for a in soup.select("h3.title a, h2.title a")[:4]:
-            title = a.text.strip()
-            href  = a.get("href", "")
-            if not href.startswith("http"):
-                href = "https://cafef.vn" + href
-            if title:
-                news.append({"title": title, "url": href})
+            t = a.text.strip()
+            h = a.get("href","")
+            if not h.startswith("http"): h = "https://cafef.vn" + h
+            if t: news.append({"title": t, "url": h})
         return news
     except:
         return []
 
 
-# ─── PHÂN TÍCH KỸ THUẬT ──────────────────────────────────────────────────────
-FIB_LOW  = 1200.0    # Đáy tháng 4/2025
-FIB_HIGH = 1933.11   # Đỉnh lịch sử
+# ─── PHÂN TÍCH KHỐI LƯỢNG 30 NGÀY ───────────────────────────────────────────
+def volume_analysis(df):
+    """
+    So sánh khối lượng & giá 30 ngày để phát hiện:
+    - Gom hàng (accumulation): giá đi ngang/tăng nhẹ, vol tăng dần
+    - Phân phối (distribution): giá đi ngang/giảm nhẹ, vol cao
+    - Phân kỳ âm: giá tăng nhưng vol giảm → lực mua yếu dần
+    - Phân kỳ dương: giá giảm nhưng vol giảm → lực bán cạn kiệt
+    - Bình thường
+    """
+    if df is None or len(df) < 10:
+        return "Không đủ dữ liệu khối lượng"
 
-def fibonacci_levels():
+    closes  = [float(r['close'])  for _, r in df.iterrows()]
+    volumes = [float(r['volume']) for _, r in df.iterrows()]
+
+    # Chia 2 nửa để so sánh trend
+    mid = len(df) // 2
+    price_early  = sum(closes[:mid])  / mid
+    price_late   = sum(closes[mid:])  / (len(df) - mid)
+    vol_early    = sum(volumes[:mid]) / mid
+    vol_late     = sum(volumes[mid:]) / (len(df) - mid)
+
+    avg_vol_30   = sum(volumes) / len(volumes)
+    last_5_vol   = sum(volumes[-5:]) / 5
+    last_price   = closes[-1]
+    first_price  = closes[0]
+
+    price_trend  = (price_late - price_early) / price_early * 100   # % giá thay đổi
+    vol_trend    = (vol_late   - vol_early)   / vol_early   * 100   # % vol thay đổi
+    vol_ratio    = last_5_vol / avg_vol_30                           # vol 5 phiên gần / tb30
+
+    # Phân loại
+    lines = []
+    avg_m = avg_vol_30 / 1e6
+    last5_m = last_5_vol / 1e6
+    lines.append(f"TB 30 phiên: {avg_m:.0f}M CP | 5 phiên gần: {last5_m:.0f}M CP")
+
+    if vol_ratio > 1.3:
+        lines.append(f"📊 Khối lượng 5 phiên GẦN ĐÂY CAO HƠN TB 30 ngày {(vol_ratio-1)*100:.0f}%")
+    elif vol_ratio < 0.7:
+        lines.append(f"📊 Khối lượng 5 phiên GẦN ĐÂY THẤP HƠN TB 30 ngày {(1-vol_ratio)*100:.0f}%")
+    else:
+        lines.append(f"📊 Khối lượng 5 phiên gần ổn định so với TB 30 ngày")
+
+    # Nhận định chính
+    if price_trend > 1.5 and vol_trend > 10:
+        signal = "🟢 GOM HÀNG / TÍCH LŨY — Giá tăng kèm volume tăng → dòng tiền vào thật"
+    elif price_trend > 1.5 and vol_trend < -10:
+        signal = "⚠️ PHÂN KỲ ÂM — Giá tăng nhưng volume giảm → lực mua đang yếu dần, cẩn thận"
+    elif price_trend < -1.5 and vol_trend > 10:
+        signal = "🔴 PHÂN PHỐI — Giá giảm kèm volume cao → bên bán đang chiếm ưu thế"
+    elif price_trend < -1.5 and vol_trend < -10:
+        signal = "🟡 PHÂN KỲ DƯƠNG — Giá giảm nhưng volume cũng giảm → lực bán cạn dần, có thể sắp hết đà giảm"
+    elif abs(price_trend) <= 1.5 and vol_trend > 15:
+        signal = "🔍 TÍCH LŨY NGANG — Giá đi ngang nhưng volume tăng → đang có bên gom âm thầm"
+    elif abs(price_trend) <= 1.5 and vol_trend < -15:
+        signal = "😴 THỊ TRƯỜNG NGỦ ĐÔNG — Giá đi ngang, volume co lại → chờ breakout"
+    else:
+        signal = "⚪ BÌNH THƯỜNG — Chưa có tín hiệu volume đặc biệt"
+
+    lines.append(signal)
+    lines.append(f"<i>(Giá 30 ngày: {first_price:,.0f}→{last_price:,.0f} | Vol trend: {vol_trend:+.0f}%)</i>")
+    return "\n".join(lines)
+
+
+# ─── FIBONACCI — 2 VÙNG GẦN NHẤT ────────────────────────────────────────────
+def fib_nearest(price):
+    """Trả về vùng hỗ trợ Fib gần nhất bên dưới & kháng cự gần nhất bên trên."""
     diff = FIB_HIGH - FIB_LOW
-    return {
-        "0.0% Đỉnh":   round(FIB_HIGH, 2),
-        "23.6%":        round(FIB_HIGH - 0.236 * diff, 2),
-        "38.2%":        round(FIB_HIGH - 0.382 * diff, 2),
-        "50.0%":        round(FIB_HIGH - 0.500 * diff, 2),
-        "61.8% 🔑":     round(FIB_HIGH - 0.618 * diff, 2),
-        "78.6%":        round(FIB_HIGH - 0.786 * diff, 2),
-        "100% Đáy":     round(FIB_LOW, 2),
-    }
-
-
-def fib_zone(price, fib):
-    levels = sorted(fib.items(), key=lambda x: x[1], reverse=True)
-    for i in range(len(levels) - 1):
-        name, val = levels[i]
-        next_name, next_val = levels[i + 1]
-        if next_val <= price <= val:
-            return f"Giữa Fib {next_name} ({next_val:,.0f}) ↔ {name} ({val:,.0f})"
-    return "Ngoài vùng Fibonacci"
-
-
-def support_resistance(price):
-    zones = [
-        (1700, 1740, "Hỗ trợ rất mạnh — đáy trung hạn"),
-        (1750, 1770, "Hỗ trợ mạnh — Fib 23.6% + MA200"),
-        (1800, 1820, "Vùng tâm lý 1.800 — S/R quan trọng"),
-        (1830, 1870, "Kháng cự gần — MA50 + MA100"),
-        (1900, 1935, "Kháng cự mạnh — vùng đỉnh lịch sử"),
+    levels = [
+        ("0.0% (Đỉnh)",  FIB_HIGH),
+        ("23.6%",         round(FIB_HIGH - 0.236 * diff, 2)),
+        ("38.2%",         round(FIB_HIGH - 0.382 * diff, 2)),
+        ("50.0%",         round(FIB_HIGH - 0.500 * diff, 2)),
+        ("61.8% 🔑",      round(FIB_HIGH - 0.618 * diff, 2)),
+        ("78.6%",         round(FIB_HIGH - 0.786 * diff, 2)),
+        ("100% (Đáy)",   FIB_LOW),
     ]
-    result = {"support": [], "resistance": []}
-    for lo, hi, label in zones:
-        if price > hi:
-            result["support"].append(f"{lo:,.0f}–{hi:,.0f}: {label}")
-        elif price < lo:
-            result["resistance"].append(f"{lo:,.0f}–{hi:,.0f}: {label}")
-        else:
-            result["support"].append(f"⚠️ Đang trong vùng {lo:,.0f}–{hi:,.0f}: {label}")
-    return result
+    above = [(n, v) for n, v in levels if v > price]
+    below = [(n, v) for n, v in levels if v < price]
+
+    support    = max(below, key=lambda x: x[1]) if below else None
+    resistance = min(above, key=lambda x: x[1]) if above else None
+    return support, resistance
 
 
+# ─── XU HƯỚNG ────────────────────────────────────────────────────────────────
 def trend_bias(price, pct):
     if price >= 1870:
         return "📈 TĂNG MẠNH — Trên kháng cự cũ", "bullish"
     elif price >= 1820:
         return "📈 TĂNG NHẸ — Hồi phục, cần xác nhận", "neutral_bullish"
     elif price >= 1800:
-        return "⚖️ GIẰNG CO — Kiểm định ngưỡng tâm lý 1.800", "neutral"
+        return "⚖️ GIẰNG CO — Kiểm định ngưỡng 1.800", "neutral"
     elif price >= 1760:
         return "📉 ĐIỀU CHỈNH — Cần giữ vùng hỗ trợ 1.760", "neutral_bearish"
     else:
@@ -201,246 +173,182 @@ def trend_bias(price, pct):
 
 
 def momentum_label(pct):
-    if pct > 1.5:   return "🟢 Momentum mạnh — dòng tiền tích cực"
-    elif pct > 0.3: return "🟡 Momentum tăng nhẹ"
-    elif pct > -0.3:return "⚪ Momentum trung lập"
-    elif pct > -1.5:return "🟠 Momentum yếu — thận trọng"
-    else:           return "🔴 Momentum giảm mạnh — cảnh báo bán"
+    if pct > 1.5:    return "🟢 Momentum mạnh"
+    elif pct > 0.3:  return "🟡 Momentum tăng nhẹ"
+    elif pct > -0.3: return "⚪ Trung lập"
+    elif pct > -1.5: return "🟠 Momentum yếu — thận trọng"
+    else:            return "🔴 Momentum giảm mạnh"
 
 
-def volume_label(volume):
-    if not volume or volume == 0:
-        return "Không có dữ liệu khối lượng"
-    v = volume / 1e6
-    if v > 600:   return f"🔥 Rất cao: {v:.0f}M CP — thị trường sôi động"
-    elif v > 400: return f"🟢 Cao: {v:.0f}M CP — thanh khoản tốt"
-    elif v > 250: return f"🟡 Trung bình: {v:.0f}M CP"
-    else:         return f"🔴 Thấp: {v:.0f}M CP — dòng tiền co hẹp"
+def weekly_change(df):
+    if df is None or len(df) < 5: return "—"
+    w = df.tail(5)
+    o, c = float(w.iloc[0]['close']), float(w.iloc[-1]['close'])
+    chg = c - o
+    pct = chg / o * 100
+    em  = "🟢" if chg > 0 else "🔴"
+    return f"{em} {o:,.0f} → {c:,.0f} ({'+' if chg>0 else ''}{pct:.2f}%)"
 
 
-def weekly_summary(df):
-    if df is None or len(df) < 5:
-        return "Không đủ dữ liệu tuần"
-    week = df.tail(5)
-    w_open  = float(week.iloc[0]['close'])
-    w_close = float(week.iloc[-1]['close'])
-    w_high  = float(week['high'].max())
-    w_low   = float(week['low'].min())
-    w_chg   = w_close - w_open
-    w_pct   = w_chg / w_open * 100
-    emoji   = "🟢" if w_chg > 0 else "🔴"
-    return (f"{emoji} Tuần: {w_open:,.2f} → {w_close:,.2f} "
-            f"({'+' if w_chg>0 else ''}{w_chg:.2f} / {w_pct:+.2f}%)\n"
-            f"   Cao nhất: {w_high:,.2f} | Thấp nhất: {w_low:,.2f}")
+def monthly_change(df):
+    if df is None or df.empty: return "—"
+    o, c = float(df.iloc[0]['close']), float(df.iloc[-1]['close'])
+    chg = c - o
+    pct = chg / o * 100
+    em  = "🟢" if chg > 0 else "🔴"
+    return f"{em} {o:,.0f} → {c:,.0f} ({'+' if chg>0 else ''}{pct:.2f}%)"
 
 
-def monthly_summary(df):
-    if df is None or df.empty:
-        return "Không đủ dữ liệu tháng"
-    m_open  = float(df.iloc[0]['close'])
-    m_close = float(df.iloc[-1]['close'])
-    m_high  = float(df['high'].max())
-    m_low   = float(df['low'].min())
-    m_chg   = m_close - m_open
-    m_pct   = m_chg / m_open * 100
-    emoji   = "🟢" if m_chg > 0 else "🔴"
-    return (f"{emoji} Tháng: {m_open:,.2f} → {m_close:,.2f} "
-            f"({'+' if m_chg>0 else ''}{m_chg:.2f} / {m_pct:+.2f}%)\n"
-            f"   Cao nhất: {m_high:,.2f} | Thấp nhất: {m_low:,.2f}")
+def support_resistance(price):
+    zones = [
+        (1700, 1740, "Hỗ trợ rất mạnh"),
+        (1750, 1770, "Hỗ trợ mạnh — Fib 23.6% + MA200"),
+        (1800, 1820, "Vùng tâm lý 1.800"),
+        (1830, 1870, "Kháng cự gần — MA50+MA100"),
+        (1900, 1935, "Kháng cự mạnh — vùng đỉnh"),
+    ]
+    sup, res = [], []
+    for lo, hi, label in zones:
+        if price > hi:
+            sup.append(f"{lo:,.0f}–{hi:,.0f} ({label})")
+        elif price < lo:
+            res.append(f"{lo:,.0f}–{hi:,.0f} ({label})")
+        else:
+            sup.append(f"⚠️ Đang trong vùng {lo:,.0f}–{hi:,.0f} ({label})")
+    return sup, res
 
 
-def forecast(price, bias):
+def forecast(bias):
     now = datetime.now(VN_TZ)
-    end = now + timedelta(weeks=2)
-    dr  = f"{now.strftime('%d/%m')}–{end.strftime('%d/%m/%Y')}"
-    scenarios = {
-        "bullish": [
-            ("🟢 Tích cực ~60%", "Tiếp tục tăng, hướng đến 1.920–1.935"),
-            ("🟡 Trung lập ~30%", "Tích lũy vùng 1.850–1.900"),
-            ("🔴 Rủi ro ~10%",   "Điều chỉnh về 1.810–1.830"),
-        ],
-        "neutral_bullish": [
-            ("🟢 Tích cực ~45%", "Hồi phục về 1.850–1.870 nếu giữ 1.800"),
-            ("🟡 Trung lập ~35%", "Giằng co 1.780–1.830"),
-            ("🔴 Rủi ro ~20%",   "Mất 1.780 → kiểm định 1.750–1.760"),
-        ],
-        "neutral": [
-            ("🟢 Tích cực ~40%", "Bứt phá trên 1.820, hướng 1.850"),
-            ("🟡 Trung lập ~35%", "Giằng co quanh 1.790–1.820"),
-            ("🔴 Rủi ro ~25%",   "Mất 1.800 → kiểm định 1.760–1.780"),
-        ],
-        "neutral_bearish": [
-            ("🟢 Tích cực ~30%", "Bật mạnh từ hỗ trợ, về 1.800–1.820"),
-            ("🟡 Trung lập ~35%", "Tích lũy vùng 1.750–1.800"),
-            ("🔴 Rủi ro ~35%",   "Phá 1.750 → hướng 1.700–1.740"),
-        ],
-        "bearish": [
-            ("🟢 Tích cực ~20%", "Bật kỹ thuật về 1.780–1.800"),
-            ("🟡 Trung lập ~30%", "Giằng co 1.700–1.760"),
-            ("🔴 Rủi ro ~50%",   "Tiếp tục giảm về 1.650–1.700"),
-        ],
+    dr  = f"{now.strftime('%d/%m')}–{(now+timedelta(weeks=2)).strftime('%d/%m')}"
+    s = {
+        "bullish":         [("🟢 ~60%","Tiếp tục tăng hướng 1.920–1.935"),("🟡 ~30%","Tích lũy 1.850–1.900"),("🔴 ~10%","Điều chỉnh về 1.810–1.830")],
+        "neutral_bullish": [("🟢 ~45%","Hồi phục về 1.850–1.870 nếu giữ 1.800"),("🟡 ~35%","Giằng co 1.780–1.830"),("🔴 ~20%","Mất 1.780 → kiểm định 1.750–1.760")],
+        "neutral":         [("🟢 ~40%","Bứt phá trên 1.820, hướng 1.850"),("🟡 ~35%","Giằng co 1.790–1.820"),("🔴 ~25%","Mất 1.800 → kiểm định 1.760–1.780")],
+        "neutral_bearish": [("🟢 ~30%","Bật mạnh từ hỗ trợ, về 1.800–1.820"),("🟡 ~35%","Tích lũy 1.750–1.800"),("🔴 ~35%","Phá 1.750 → hướng 1.700–1.740")],
+        "bearish":         [("🟢 ~20%","Bật kỹ thuật về 1.780–1.800"),("🟡 ~30%","Giằng co 1.700–1.760"),("🔴 ~50%","Tiếp tục giảm về 1.650–1.700")],
     }
-    lines = [f"📅 Dự báo {dr}"]
-    for label, desc in scenarios.get(bias, scenarios["neutral"]):
+    lines = [f"📅 {dr}"]
+    for label, desc in s.get(bias, s["neutral"]):
         lines.append(f"  {label}: {desc}")
     return "\n".join(lines)
 
 
-def advice(price, bias):
-    tips = {
-        "bullish": (
-            "✅ Có thể mua — ưu tiên cổ phiếu đầu ngành thanh khoản cao\n"
-            "📌 Ví dụ quan tâm: FPT, VCB, TCB, VIC, VHM\n"
-            "⚠️ Stoploss dưới 1.850 | Tỷ lệ giải ngân: 60–70%"
-        ),
-        "neutral_bullish": (
-            "⏳ Quan sát — chờ xác nhận trước khi vào mạnh\n"
-            "📌 Ưu tiên cổ phiếu phòng thủ: VCB, BID, GAS, PLX\n"
-            "⚠️ Không mua đuổi — chờ pullback | Tỷ lệ giải ngân: 30–50%"
-        ),
-        "neutral": (
-            "🔍 Theo dõi vùng 1.800 — chưa nên vào mạnh\n"
-            "📌 Nếu mua thử: VCB, FPT (cổ phiếu nền tảng)\n"
-            "⚠️ Stoploss dưới 1.780 | Tỷ lệ giải ngân: 20–40%"
-        ),
-        "neutral_bearish": (
-            "🛑 Thận trọng — giảm tỷ trọng hoặc giữ tiền mặt\n"
-            "📌 Vùng mua thử: 1.750–1.760 với 20% vốn, stoploss 1.730\n"
-            "⚠️ Ưu tiên bảo toàn | Tỷ lệ giải ngân: 10–20%"
-        ),
-        "bearish": (
-            "🔴 KHÔNG MUA — Thị trường đang giảm mạnh\n"
-            "📌 Bảo toàn vốn, nâng tiền mặt 70–80%\n"
-            "⚠️ Chỉ mua khi có tín hiệu đảo chiều rõ ràng (Hammer + volume lớn)"
-        ),
+def advice(bias):
+    t = {
+        "bullish":         "✅ Có thể mua — ưu tiên FPT, VCB, TCB, VIC\n⚠️ Stoploss dưới 1.850 | Giải ngân 60–70%",
+        "neutral_bullish": "⏳ Quan sát — chờ xác nhận\n📌 Nếu mua: VCB, BID, GAS | Giải ngân 30–50%",
+        "neutral":         "🔍 Theo dõi vùng 1.800\n📌 Thử nghiệm nhỏ: VCB, FPT | Giải ngân 20–40%",
+        "neutral_bearish": "🛑 Thận trọng — giữ tiền mặt\n📌 Mua thử 1.750–1.760, stoploss 1.730 | Giải ngân 10–20%",
+        "bearish":         "🔴 KHÔNG MUA — Bảo toàn vốn 70–80%\n📌 Chỉ vào khi có nến đảo chiều + volume lớn",
     }
-    return "💡 LỜI KHUYÊN\n" + tips.get(bias, tips["neutral"])
+    return "💡 LỜI KHUYÊN\n" + t.get(bias, t["neutral"])
 
 
-# ─── BUILD BÁO CÁO ───────────────────────────────────────────────────────────
-def build_report(session):
-    now      = datetime.now(VN_TZ)
-    weekday  = ["Thứ 2","Thứ 3","Thứ 4","Thứ 5","Thứ 6","Thứ 7","CN"][now.weekday()]
+# ─── BUILD & GỬI ─────────────────────────────────────────────────────────────
+def build_and_send(session):
+    now = datetime.now(VN_TZ)
+    weekday = ["Thứ 2","Thứ 3","Thứ 4","Thứ 5","Thứ 6","Thứ 7","CN"][now.weekday()]
     date_str = now.strftime(f"{weekday}, %d/%m/%Y %H:%M")
-    emoji    = "🌅" if session == "morning" else "🌆"
-    title    = "BÁO CÁO SÁNG" if session == "morning" else "BÁO CÁO CHIỀU"
 
-    L = [f"{emoji} <b>VN-INDEX {title}</b>", f"📆 {date_str}", ""]
+    L = [f"📆 <b>{date_str}</b>", ""]
 
-    # ── Lấy dữ liệu
-    d = fetch_vnindex()
+    # ── Dữ liệu
+    df = fetch_history(35)
+    d  = parse_latest(df)
     if not d:
-        L.append("⚠️ Không lấy được dữ liệu. Vui lòng kiểm tra lại nguồn.")
-        send_telegram("\n".join(L))
-        return
+        L.append("⚠️ Không lấy được dữ liệu giá.")
+        send_telegram("\n".join(L)); return
 
     price  = d["price"]
     change = d["change"]
     pct    = d["pct"]
     volume = d.get("volume", 0)
-    src    = d.get("source", "")
-    pct_em = "🟢" if pct > 0 else ("🔴" if pct < 0 else "⚪")
     sign   = "+" if change > 0 else ""
-
-    breadth = fetch_breadth()
+    pct_em = "🟢" if pct > 0 else ("🔴" if pct < 0 else "⚪")
 
     # ── Điểm số
     L += [
         "━━━━━━━━━━━━━━━━━━━━",
-        "📊 <b>ĐIỂM SỐ</b>",
-        f"VN-Index: <b>{price:,.2f}</b> điểm",
-        f"Thay đổi: {pct_em} {sign}{change:.2f} ({sign}{pct:.2f}%)",
-        volume_label(volume),
+        f"📊 VN-Index: <b>{price:,.2f}</b>  {pct_em} {sign}{change:.2f} ({sign}{pct:.2f}%)",
+        f"Cao: {d['high']:,.2f} | Thấp: {d['low']:,.2f}",
+        f"Khối lượng: {volume/1e6:.0f}M CP",
     ]
-    if breadth:
-        L.append(f"Tăng / Giảm / Đứng: {breadth.get('advances','?')} / {breadth.get('declines','?')} / {breadth.get('nochanges','?')}")
-    if d.get("high") and d.get("low"):
-        L.append(f"Cao: {d['high']:,.2f} | Thấp: {d['low']:,.2f}")
-    L.append(f"<i>Nguồn: {src}</i>")
 
     # ── Xu hướng
     trend_txt, bias = trend_bias(price, pct)
-    L += ["", "━━━━━━━━━━━━━━━━━━━━", "📈 <b>XU HƯỚNG</b>",
+    L += ["", "━━━━━━━━━━━━━━━━━━━━",
+          f"📈 <b>XU HƯỚNG</b>",
           trend_txt, momentum_label(pct)]
 
-    # ── S/R
-    sr = support_resistance(price)
+    # ── Kháng cự / Hỗ trợ
+    sup, res = support_resistance(price)
     L += ["", "━━━━━━━━━━━━━━━━━━━━", "🧱 <b>KHÁNG CỰ / HỖ TRỢ</b>"]
-    if sr["resistance"]:
-        L.append("🔴 Kháng cự:")
-        for z in sr["resistance"][:2]: L.append(f"  • {z}")
-    if sr["support"]:
-        L.append("🟢 Hỗ trợ:")
-        for z in sr["support"][:2]: L.append(f"  • {z}")
+    if res: L.append("🔴 Kháng cự: " + " | ".join(res[:2]))
+    if sup: L.append("🟢 Hỗ trợ: "  + " | ".join(sup[:2]))
 
-    # ── Fibonacci
-    fib = fibonacci_levels()
-    L += ["", "━━━━━━━━━━━━━━━━━━━━",
-          f"📐 <b>FIBONACCI</b> (Đáy {FIB_LOW:,.0f} → Đỉnh {FIB_HIGH:,.0f})"]
-    for name, val in fib.items():
-        marker = " ◀ BẠN ĐANG Ở ĐÂY" if abs(price - val) < 30 else ""
-        L.append(f"  • {name}: {val:,.2f}{marker}")
-    L.append(f"📍 {fib_zone(price, fib)}")
+    # ── Fibonacci (2 vùng gần nhất)
+    fib_sup, fib_res = fib_nearest(price)
+    L += ["", "━━━━━━━━━━━━━━━━━━━━", "📐 <b>FIBONACCI</b>"]
+    if fib_res:
+        name, val = fib_res
+        L.append(f"🔴 Kháng cự Fib gần nhất: <b>{val:,.2f}</b> ({name})")
+    if fib_sup:
+        name, val = fib_sup
+        L.append(f"🟢 Hỗ trợ Fib gần nhất:   <b>{val:,.2f}</b> ({name})")
+
+    # ── Khối lượng 30 ngày
+    L += ["", "━━━━━━━━━━━━━━━━━━━━", "📦 <b>KHỐI LƯỢNG 30 NGÀY</b>",
+          volume_analysis(df)]
 
     # ── Ngày / Tuần / Tháng
-    df_hist = fetch_weekly_data()
-    L += ["", "━━━━━━━━━━━━━━━━━━━━", "🗓 <b>PHÂN TÍCH KHUNG THỜI GIAN</b>"]
-    day_txt = ("Phiên sáng — theo dõi khối lượng đầu phiên"
-               if session == "morning"
-               else f"Đóng cửa {price:,.2f} — {'Tích cực' if pct > 0 else 'Tiêu cực' if pct < 0 else 'Trung lập'}")
-    L.append(f"📌 <b>Hôm nay:</b> {day_txt}")
-    L.append(f"📌 <b>Tuần:</b> {weekly_summary(df_hist)}")
-    L.append(f"📌 <b>Tháng 6:</b> {monthly_summary(df_hist)}")
+    L += ["", "━━━━━━━━━━━━━━━━━━━━", "🗓 <b>KHUNG THỜI GIAN</b>"]
+    if session == "morning":
+        L.append(f"📌 Hôm nay: Phiên sáng — theo dõi khối lượng đầu phiên")
+    else:
+        L.append(f"📌 Hôm nay: Đóng cửa {price:,.2f} — {'Tích cực' if pct>0 else 'Tiêu cực' if pct<0 else 'Trung lập'}")
+    L.append(f"📌 Tuần:   {weekly_change(df)}")
+    L.append(f"📌 Tháng:  {monthly_change(df)}")
 
-    # ── Dự báo
+    # ── Dự báo 2 tuần
     L += ["", "━━━━━━━━━━━━━━━━━━━━", "🔮 <b>DỰ BÁO 2 TUẦN TỚI</b>",
-          forecast(price, bias)]
+          forecast(bias)]
 
     # ── Lời khuyên
-    L += ["", "━━━━━━━━━━━━━━━━━━━━", advice(price, bias)]
+    L += ["", "━━━━━━━━━━━━━━━━━━━━", advice(bias)]
 
     # ── Tin tức
     news = fetch_news()
     if news:
-        L += ["", "━━━━━━━━━━━━━━━━━━━━", "📰 <b>TIN TỨC NỔI BẬT</b>"]
+        L += ["", "━━━━━━━━━━━━━━━━━━━━", "📰 <b>TIN TỨC</b>"]
         for item in news:
             L.append(f"• <a href='{item['url']}'>{item['title']}</a>")
 
-    # ── Nguồn
+    # ── Nguồn & chú thích
     L += [
-        "", "━━━━━━━━━━━━━━━━━━━━", "🔗 <b>NGUỒN DỮ LIỆU</b>",
-        "• <a href='https://github.com/thinh-vu/vnstock'>vnstock v4</a> — Dữ liệu giá chính (KBS/TCBS)",
-        "• <a href='https://cafef.vn/thi-truong-chung-khoan.chn'>CafeF</a> — Breadth & Tin tức",
-        "• <a href='https://vietstock.vn/chu-de/nhan-dinh-thi-truong.htm'>Vietstock</a> — Nhận định",
-        "• <a href='https://vneconomy.vn/chung-khoan.htm'>VnEconomy</a> — Vĩ mô",
-        "• <a href='https://www.hsx.vn/'>HOSE</a> — Sàn chính thức",
-        "", "⚠️ <i>Bot phân tích tự động — không phải tư vấn đầu tư. DYOR!</i>",
+        "", "━━━━━━━━━━━━━━━━━━━━",
+        "🔗 <b>NGUỒN</b>: <a href='https://github.com/thinh-vu/vnstock'>vnstock v4</a> (giá) · <a href='https://cafef.vn'>CafeF</a> (tin tức)",
+        "🧮 Xu hướng, Fib, S/R, Vol được <b>tính tự động bằng công thức trong code</b> — không copy bài viết",
+        "⚠️ <i>Phân tích tham khảo, không phải tư vấn đầu tư. DYOR!</i>",
     ]
 
     send_telegram("\n".join(L))
 
 
-# ─── GỬI TELEGRAM ────────────────────────────────────────────────────────────
 def send_telegram(msg):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    r = requests.post(url, json={
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": msg,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": False,
-    }, timeout=15)
-    if r.status_code == 200:
-        print("✅ Đã gửi Telegram!")
-    else:
-        print(f"❌ Lỗi Telegram {r.status_code}: {r.text}")
+    r = requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+        json={"chat_id": TELEGRAM_CHAT_ID, "text": msg,
+              "parse_mode": "HTML", "disable_web_page_preview": False},
+        timeout=15)
+    print("✅ Sent!" if r.status_code == 200 else f"❌ {r.status_code}: {r.text}")
 
 
-# ─── MAIN ─────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     now = datetime.now(VN_TZ)
     if now.weekday() >= 5:
-        print(f"📅 Cuối tuần — thị trường đóng cửa.")
+        print("📅 Cuối tuần — thị trường đóng.")
     else:
         session = "morning" if now.hour < 12 else "afternoon"
-        print(f"🚀 Đang tạo báo cáo phiên {session.upper()}...")
-        build_report(session)
+        print(f"🚀 Phiên {session.upper()}...")
+        build_and_send(session)
